@@ -153,6 +153,7 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
 const uid=()=>Math.random().toString(36).slice(2,8);
 const DEFAULTS={rosterSize:8,startBid:1,increment:1,timer:20,extend:8,baseBudget:60,stepBudget:10};
 const SESSION_KEY='vbauction:session';
+const DEFAULT_ROOM='rayvolley2026';
 const app=$('#app');
 
 /* ================= 数据层：Firebase / 本地 两种实现 ================= */
@@ -235,12 +236,22 @@ function derive(d){
   const pool=players.filter(p=>!soldMap[p.id]);
   const auction=d.auction||{state:'idle'};
   const signups=Object.entries(d.signups||{}).map(([id,x])=>Object.assign({id},x)).sort((a,b)=>(a.order||0)-(b.order||0));
-  const prebids=d.prebids||{};const prebidDone=d.prebidDone||{};
+  const scores=d.scores||{};const scoreDone=d.scoreDone||{};
+  // 平均分：去掉最高/最低后的均值（trimmed mean），保留 1 位小数；0 分是有效分数
   const avg={};
-  players.forEach(p=>{let sum=0,n=0;
-    teams.forEach(t=>{const v=Number((prebids[t.id]||{})[p.id]);if(v>0){sum+=v;n++}});
-    if(n)avg[p.id]={avg:Math.round(sum/n*10)/10,n};});
-  return {cfg,teams,players,sales,soldMap,pname,pool,auction,signups,prebids,prebidDone,avg};
+  players.forEach(p=>{const vals=[];
+    teams.forEach(t=>{const raw=(scores[t.id]||{})[p.id];
+      if(raw!==undefined&&raw!==null&&raw!==''&&isFinite(Number(raw)))vals.push(Number(raw));});
+    if(vals.length){
+      let use=vals.slice();
+      if(use.length>=3){use.sort((a,b)=>a-b);use=use.slice(1,-1)}
+      const sum=use.reduce((a,v)=>a+v,0);
+      avg[p.id]={avg:Math.round(sum/use.length*10)/10,n:vals.length};
+    }});
+  let order=null;
+  if(Array.isArray(d.order))order=d.order.slice();
+  else if(d.order&&typeof d.order==='object')order=Object.keys(d.order).sort((a,b)=>a-b).map(k=>d.order[k]);
+  return {cfg,teams,players,sales,soldMap,pname,pool,auction,signups,scores,scoreDone,avg,order};
 }
 // 一支队伍当前最多能出多少：必须给剩余空位每人至少留一个起拍价
 function maxBidFor(t,cfg){
@@ -325,16 +336,10 @@ function refresh(){
 function renderJoin(){
   if(S.drawn==='join')return;S.drawn='join';
   const q=new URLSearchParams(location.search);
-  app.innerHTML=`<div class="wrap stack">
-    <div style="text-align:center"><div class="logo">🏐</div><h1>排球选人大会</h1>
-    <div class="muted">拍卖式选人系统 · 公开 / 匿名竞价</div></div>
-    <div class="card stack">
-      <div><label>房间号（所有人输入同一个）</label>
-      <input id="roomIn" value="${esc(q.get('room')||'')}" placeholder="例如 volley2026" autocapitalize="off" autocomplete="off"></div>
-      <button class="primary" data-act="join" style="width:100%">进入房间</button>
-      <div class="muted" style="font-size:12px">${window.FIREBASE_CONFIG&&window.firebase?'🟢 在线模式（Firebase 实时同步）':'🟡 本地演示模式：仅同一浏览器的多个标签页互通。要让大家用各自手机，请按 README 配置 Firebase'}</div>
-    </div></div>`;
-  if(q.get('room')) { /* 链接带房号，自动进入 */ setTimeout(()=>doJoin(q.get('room')),0); }
+  // 一次性活动：固定房间。链接带 room 参数就用参数，否则进默认房间，不再让用户输房号
+  const room=q.get('room')||DEFAULT_ROOM;
+  app.innerHTML='<div class="center">连接中…</div>';
+  setTimeout(()=>doJoin(room),0);
 }
 function doJoin(room){
   room=String(room||'').trim().replace(/[.#$\[\]\/]/g,'');
@@ -355,12 +360,21 @@ function renderCreate(){
 }
 
 const POSITIONS=['主攻','副攻','二传','接应','自由人','都可以'];
+function bundleTag(D,x){
+  if(!x||!x.bundle)return '';
+  const t=D.teams.find(y=>y.id===x.bundle);
+  return ` <span class="pill warn">🔗打包→${esc(t?t.name:'?')}</span>`;
+}
 function renderSignup(){
+  const D=derive(S.data);
+  const bundleOpts=`<option value="">没有打包</option>`+D.teams.map(t=>`<option value="${t.id}">${esc(t.name)}${t.captain?' · '+esc(t.captain):''}</option>`).join('');
   app.innerHTML=`<div class="wrap stack">
     <div style="text-align:center"><div class="logo">📝</div><h1>球员报名</h1><div class="muted">房间「${esc(S.room)}」</div></div>
     <div class="card stack">
       <div><label>你的名字</label><input id="sgName" maxlength="20" autocomplete="off"></div>
       <div><label>想打的位置（可多选）</label><div class="chips">${POSITIONS.map(x=>`<label class="chip" style="cursor:pointer;margin:0;display:inline-flex;align-items:center;color:var(--text)"><input type="checkbox" class="sgPos" value="${x}" style="width:auto;margin:0 6px 0 0">${x}</label>`).join('')}</div></div>
+      <div><label>打包（已和某位队长提前绑定，如夫妻档，选秀时直接进该队）</label><select id="sgBundle">${bundleOpts}</select>
+      ${D.teams.length?'':'<div class="muted" style="font-size:12px;margin-top:4px">主持人还没建队伍：如需打包，请把队长名字写在下面的备注里。</div>'}</div>
       <div><label>备注（可选，例如水平、身高）</label><input id="sgNote" maxlength="40" autocomplete="off"></div>
       <button class="primary" data-act="submitSignup" style="width:100%">提交报名</button>
     </div>
@@ -369,9 +383,9 @@ function renderSignup(){
 }
 function signListHtml(D){
   const closed=D.cfg.signupOpen===false;
-  const all=D.players.map(x=>({name:x.name,pos:x.note})).concat(D.signups.map(x=>({name:x.name,pos:x.pos})));
+  const all=D.players.map(x=>({name:x.name,pos:x.note,bundle:x.bundle})).concat(D.signups.map(x=>({name:x.name,pos:x.pos,bundle:x.bundle})));
   return (closed?'<div class="status-warn" style="margin-bottom:10px">报名已关闭</div>':'')+
-    `<div class="muted" style="margin-bottom:8px">共 ${all.length} 人</div><div class="chips">${all.map(x=>`<span class="chip">${esc(x.name)}<small>${esc(x.pos||'')}</small></span>`).join('')||'<span class="muted">还没有人报名</span>'}</div>`;
+    `<div class="muted" style="margin-bottom:8px">共 ${all.length} 人</div><div class="chips">${all.map(x=>`<span class="chip">${esc(x.name)}${bundleTag(D,x)}<small>${esc(x.pos||'')}</small></span>`).join('')||'<span class="muted">还没有人报名</span>'}</div>`;
 }
 
 function renderRole(){
@@ -418,7 +432,7 @@ function buildApp(){
   else if(S.role==='captain'){rp.className='pill cap';rp.textContent='队长'}
   else{rp.textContent='观众'}
   const tabs=[['stage','🎯 选人大会'],['teams','👥 队伍','narrow-only'],['pool','📋 球员池','narrow-only']];
-  if(S.role==='captain'||S.role==='host')tabs.push(['prebid','💰 预选价']);
+  if(S.role==='captain'||S.role==='host')tabs.push(['prebid','⭐ 打分']);
   if(S.role==='host')tabs.push(['setup','⚙️ 设置']);
   $('#tabs').innerHTML=tabs.map(t=>`<button data-act="tab" data-tab="${t[0]}" class="${t[2]||''}">${t[1]}</button>`).join('');
   setTab('stage');
@@ -458,7 +472,7 @@ function updateApp(){
   patch($('#p-stage'),stageHtml(D));
   patch($('#p-teams'),teamsHtml(D));
   patch($('#p-pool'),poolHtml(D));
-  if(S.role==='captain'||S.role==='host')patch($('#p-prebid'),prebidHtml(D));
+  if(S.role==='captain'||S.role==='host')patch($('#p-prebid'),scoreHtml(D));
   if(S.role==='host'&&$('#signBox'))patch($('#signBox'),signBoxHtml(D));
   tick();
 }
@@ -488,10 +502,10 @@ function stageHtml(D){
     const popCls=S.animKey!==animKey?'pop':'';S.animKey=animKey;
     const modeBadge=`<span class="badge ${a.mode==='anon'?'anon':'public'}">${a.mode==='anon'?'🕶 匿名竞价':'📢 公开竞价'}</span>`;
     h+=`<div class="card stagecard ${a.state}">
-      <div class="row between">${modeBadge}<span class="muted" style="font-size:13px">第 ${a.seq||1} 位 · 池中还剩 ${D.pool.length} 人</span></div>
+      <div class="row between">${modeBadge}<span class="muted" style="font-size:13px">${a.ordN&&a.ordTotal?`第 ${a.ordN} / 共 ${a.ordTotal} 顺位 · `:''}第 ${a.seq||1} 位 · 池中还剩 ${D.pool.length} 人</span></div>
       <div class="pname ${popCls}">${esc(p.name)}</div>
       <div class="pnote">${esc(p.note||'')}</div>
-      ${D.cfg.avgPublished&&D.avg[p.id]?`<div class="pnote" style="color:var(--accent2);margin-top:4px">📊 各队预选均价 ${D.avg[p.id].avg}亿（${D.avg[p.id].n} 队填写）</div>`:''}`;
+      ${D.cfg.avgPublished&&D.avg[p.id]?`<div class="pnote" style="color:var(--accent2);margin-top:4px">⭐ 平均分 ${D.avg[p.id].avg}（${D.avg[p.id].n} 队打分，去最高/最低）</div>`:''}`;
     if(a.state==='ready'){
       h+=`<div class="bidlbl" style="margin-top:18px">起拍价 ${cfg.startBid}亿 · 加价幅度 ${cfg.increment}亿 · 限时 ${cfg.timer} 秒</div>
           <div class="leader muted">等待主持人开始竞价…</div>`;
@@ -547,7 +561,12 @@ function hostPanelHtml(D,a){
   const st=a.state||'idle';
   let b='';
   if(st==='idle'||st==='sold'||st==='unsold'){
-    b+=`<button class="primary" data-act="draw" ${D.pool.length?'':'disabled'}>🎲 随机抽下一位</button>`;
+    if(D.order&&D.order.length){
+      b+=`<button class="primary" data-act="draw" ${D.pool.length?'':'disabled'}>➡️ 按顺序抽下一位</button>`;
+      b+=`<button data-act="drawRandom" ${D.pool.length?'':'disabled'}>🎲 随机抽一位</button>`;
+    }else{
+      b+=`<button class="primary" data-act="draw" ${D.pool.length?'':'disabled'}>🎲 随机抽下一位</button>`;
+    }
   }
   if(st==='ready'){
     b+=`<div class="row" style="width:100%">
@@ -559,7 +578,7 @@ function hostPanelHtml(D,a){
   if(st==='bidding'){
     b+=`<button class="good" data-act="endNow">⏹ 立即结束</button><button data-act="addTime">⏱ +10 秒</button>`;
   }
-  b+=`<button class="small" data-act="pubAvg">${D.cfg.avgPublished?'🙈 收起预选均价':'📢 公布预选均价'}</button>`;
+  b+=`<button class="small" data-act="pubAvg">${D.cfg.avgPublished?'🙈 收起平均分':'📢 公布平均分'}</button>`;
   b+=`<button class="danger small" data-act="undo" ${D.sales.length?'':'disabled'}>↩ 撤销上一次成交</button>`;
   return `<div class="card"><h2>🎙 主持人控制</h2><div class="row">${b}</div></div>`;
 }
@@ -586,43 +605,74 @@ function teamsHtml(D){
 
 function poolHtml(D){
   return `<div class="card"><h2>📋 球员池（剩 ${D.pool.length} / ${D.players.length}）</h2>
-    <div class="chips">${D.pool.map(p=>`<span class="chip">${esc(p.name)}${p.note?`<small>${esc(p.note)}</small>`:''}${D.cfg.avgPublished&&D.avg[p.id]?`<small style="color:var(--accent2)">均价${D.avg[p.id].avg}亿</small>`:''}</span>`).join('')||'<span class="muted">已全部选完</span>'}</div>
+    <div class="chips">${D.pool.map(p=>`<span class="chip">${esc(p.name)}${p.note?`<small>${esc(p.note)}</small>`:''}${D.cfg.avgPublished&&D.avg[p.id]?`<small style="color:var(--accent2)">平均分${D.avg[p.id].avg}</small>`:''}</span>`).join('')||'<span class="muted">已全部选完</span>'}</div>
     ${D.sales.length?`<h3>已成交</h3><div class="chips">${D.sales.slice().reverse().map(s=>{
       const t=D.teams.find(x=>x.id===s.tid);
       return `<span class="chip sold">${esc((D.pname[s.pid]||{}).name||'?')}<small>→ ${t?esc(t.name):'?'} ${s.price}亿</small></span>`}).join('')}</div>`:''}
   </div>`;
 }
 
-/* ================= 预选价 ================= */
-function prebidHtml(D){
+/* ================= 打分（0-100） ================= */
+// 按平均分排名：平均分高→低，同分比打分队数，再按原顺序（显示用，确定性排序）
+function rankedPool(D){
+  return D.pool.slice().sort((a,b)=>{
+    const sa=D.avg[a.id],sb=D.avg[b.id];
+    const va=sa?sa.avg:-1,vb=sb?sb.avg:-1;
+    if(vb!==va)return vb-va;
+    const na=sa?sa.n:0,nb=sb?sb.n:0;
+    if(nb!==na)return nb-na;
+    return (a.order||0)-(b.order||0);
+  });
+}
+function scoreHtml(D){
   const pub=!!D.cfg.avgPublished;
   if(S.role==='captain'){
     const me=D.teams.find(t=>t.id===S.teamId);
     if(!me)return '';
-    const mine=D.prebids[S.teamId]||{};
-    const done=!!D.prebidDone[S.teamId];
-    const filled=D.pool.filter(p=>Number(mine[p.id])>0).length;
+    const mine=D.scores[S.teamId]||{};
+    const done=!!D.scoreDone[S.teamId];
+    const has=p=>mine[p.id]!==undefined&&mine[p.id]!==null&&mine[p.id]!==''&&isFinite(Number(mine[p.id]));
+    const filled=D.pool.filter(has).length;
     return `<div style="max-width:700px;margin:0 auto"><div class="card">
-      <h2>💰 我的预选价</h2>
-      <div class="muted" style="font-size:13px;margin-bottom:8px">每个球员你最多愿意出多少亿？不想要的留空。别人看不到你填的数字，主持人只会看到各队的平均值。填完自动保存。</div>
-      <div class="muted" style="font-size:13px">${esc(me.name)} · 预算 ${me.remaining}亿 · 已填 ${filled}/${D.pool.length} 人</div>
-      <button class="${done?'good':'primary'}" data-act="pbDone" style="width:100%;margin:10px 0">${done?'✅ 已提交（点击可撤回修改）':'我填好了（通知主持人）'}</button>
+      <h2>⭐ 我的打分</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:8px">给每位球员打 0–100 分（0 分也是有效分数，不想评的留空）。别人看不到你打的分，主持人汇总后会去掉一个最高分和一个最低分算平均分。填完自动保存。</div>
+      <div class="muted" style="font-size:13px">${esc(me.name)} · 已打分 ${filled}/${D.pool.length} 人</div>
+      <button class="${done?'good':'primary'}" data-act="scDone" style="width:100%;margin:10px 0">${done?'✅ 已提交（点击可撤回修改）':'我填好了（通知主持人）'}</button>
       ${D.pool.map(p=>`<div class="prow2"><div class="grow"><b>${esc(p.name)}</b>
-        <div class="muted" style="font-size:12px">${esc(p.note||'')}${pub&&D.avg[p.id]?` · 均价 ${D.avg[p.id].avg}亿`:''}</div></div>
-        <input id="pb_${p.id}" data-pb="${p.id}" type="number" inputmode="numeric" min="0" placeholder="亿" value="${mine[p.id]>0?mine[p.id]:''}"></div>`).join('')||'<div class="muted">球员池为空</div>'}
+        <div class="muted" style="font-size:12px">${esc(p.note||'')}${pub&&D.avg[p.id]?` · 平均分 ${D.avg[p.id].avg}`:''}</div></div>
+        <input id="sc_${p.id}" data-sc="${p.id}" type="number" inputmode="numeric" min="0" max="100" step="1" placeholder="0-100" value="${has(p)?mine[p.id]:''}"></div>`).join('')||'<div class="muted">球员池为空</div>'}
     </div></div>`;
   }
-  // 主持人：汇总
-  const doneN=D.teams.filter(t=>D.prebidDone[t.id]).length;
-  return `<div style="max-width:700px;margin:0 auto"><div class="card">
-    <h2>💰 预选价汇总（只有主持人能看到）</h2>
-    <div class="muted" style="font-size:13px;margin-bottom:8px">已提交 ${doneN}/${D.teams.length} 队</div>
-    <div class="chips" style="margin-bottom:12px">${D.teams.map(t=>`<span class="chip">${esc(t.name)} ${D.prebidDone[t.id]?'✅':'⏳'}</span>`).join('')}</div>
-    <button class="${pub?'':'primary'}" data-act="pubAvg" style="width:100%">${pub?'🙈 收起平均价（大家看不到）':'📢 公布平均价给所有人'}</button>
-    <div class="muted" style="font-size:12px;margin:8px 0">${pub?'已公布：所有人在球员池和竞价页都能看到平均价':'未公布：下面的平均价只有你自己能看到'}</div>
-    <table class="tbl"><tr><th>球员</th><th>平均价</th><th>填写队数</th></tr>
-    ${D.pool.map(p=>`<tr><td>${esc(p.name)} <span class="muted" style="font-size:12px">${esc(p.note||'')}</span></td><td><b style="color:var(--accent2)">${D.avg[p.id]?D.avg[p.id].avg+'亿':'-'}</b></td><td>${D.avg[p.id]?D.avg[p.id].n:0}</td></tr>`).join('')}
-    </table></div></div>`;
+  // 主持人：汇总（每队分数 + 去高低平均分 + 排名）
+  const doneN=D.teams.filter(t=>D.scoreDone[t.id]).length;
+  const ranked=rankedPool(D);
+  const cell=(t,p)=>{
+    const raw=(D.scores[t.id]||{})[p.id];
+    return (raw===undefined||raw===null||raw===''||!isFinite(Number(raw)))?'<span class="muted">-</span>':esc(raw);
+  };
+  let orderBlock='';
+  if(D.order&&D.order.length){
+    orderBlock=`<h3>🎲 当前竞拍顺序（共 ${D.order.length} 人）</h3>
+      <div class="stack" style="font-size:14px">${D.order.map((pid,i)=>{
+        const p=D.pname[pid];
+        return `<div>${i+1}. ${esc(p?p.name:'（已删除）')}${D.soldMap[pid]?' <span class="muted">（已成交）</span>':''} <span class="muted">平均分 ${D.avg[pid]?D.avg[pid].avg:'-'}</span></div>`;
+      }).join('')}</div>`;
+  }
+  return `<div style="max-width:1100px;margin:0 auto"><div class="card">
+    <h2>⭐ 打分汇总（只有主持人能看到）</h2>
+    <div class="muted" style="font-size:13px;margin-bottom:8px">已提交 ${doneN}/${D.teams.length} 队 · 平均分 = 至少 3 队打分时去掉一个最高、一个最低后取平均</div>
+    <div class="chips" style="margin-bottom:12px">${D.teams.map(t=>`<span class="chip">${esc(t.name)} ${D.scoreDone[t.id]?'✅':'⏳'}</span>`).join('')}</div>
+    <button class="${pub?'':'primary'}" data-act="pubAvg" style="width:100%">${pub?'🙈 收起平均分（大家看不到）':'📢 公布平均分给所有人'}</button>
+    <div class="muted" style="font-size:12px;margin:8px 0">${pub?'已公布：所有人在球员池和竞价页都能看到平均分':'未公布：下面的分数和平均分只有你自己能看到'}</div>
+    <div style="overflow-x:auto"><table class="tbl"><tr><th>名次</th><th>球员</th>${D.teams.map(t=>`<th>${esc(t.name)}</th>`).join('')}<th>打分队数</th><th>平均分</th></tr>
+    ${ranked.map((p,i)=>`<tr><td>${i+1}</td><td>${esc(p.name)} <span class="muted" style="font-size:12px">${esc(p.note||'')}</span></td>${D.teams.map(t=>`<td>${cell(t,p)}</td>`).join('')}<td>${D.avg[p.id]?D.avg[p.id].n:0}</td><td><b style="color:var(--accent2)">${D.avg[p.id]?D.avg[p.id].avg:'-'}</b></td></tr>`).join('')}
+    </table></div>
+    <h3>🎲 竞拍顺序</h3>
+    <div class="muted" style="font-size:12px;margin-bottom:8px">按平均分从高到低排：前 12 名按名次顺序出场，其余球员随机打乱排在后面。生成后在选人大会点「按顺序抽下一位」即按此顺序进行（仍可随机抽一位）。</div>
+    <div class="row"><button class="primary" data-act="genOrder" ${D.pool.length?'':'disabled'}>🎲 生成竞拍顺序</button>
+    ${D.order&&D.order.length?'<button class="danger" data-act="clearOrder">清除顺序</button>':''}</div>
+    ${orderBlock}
+    </div></div>`;
 }
 
 function signBoxHtml(D){
@@ -632,7 +682,7 @@ function signBoxHtml(D){
       <button data-act="toggleSignup">${open?'🔒 关闭报名':'🔓 开放报名'}</button>
       <button data-act="copySignup">复制报名链接</button>
       ${D.signups.length?'<button class="primary" data-act="approveAll">全部加入球员池</button>':''}</div>
-    ${D.signups.map(x=>`<div class="prow2"><div class="grow"><b>${esc(x.name)}</b> <span class="muted" style="font-size:13px">${esc(x.pos||'')}${x.note?' · '+esc(x.note):''}</span></div>
+    ${D.signups.map(x=>`<div class="prow2"><div class="grow"><b>${esc(x.name)}</b>${bundleTag(D,x)} <span class="muted" style="font-size:13px">${esc(x.pos||'')}${x.note?' · '+esc(x.note):''}</span></div>
       <button class="small primary" data-act="approve" data-id="${x.id}">加入</button>
       <button class="danger small" data-act="delSignup" data-id="${x.id}">✕</button></div>`).join('')||'<div class="muted">暂无待确认的报名。把报名链接发到群里，大家自己填名字和位置。</div>'}
   </div>`;
@@ -665,15 +715,25 @@ setInterval(()=>{
 },250);
 
 /* ================= 业务动作 ================= */
-async function draw(){
+async function draw(forceRandom){
   const D=derive(S.data),a=D.auction;
   if(D.teams.every(t=>t.slotsLeft<=0)&&D.teams.length){toast('所有队伍都已满员','bad');return}
   let cand=D.pool;
   if(a.state==='unsold'&&cand.length>1)cand=cand.filter(p=>p.id!==a.pid);
   if(a.state==='ready'&&cand.length>1)cand=cand.filter(p=>p.id!==a.pid);
   if(!cand.length){toast('球员池已空','bad');return}
-  const p=cand[Math.floor(Math.random()*cand.length)];
-  await S.adapter.set('auction',{state:'ready',pid:p.id,mode:a.mode||'public',seq:(a.seq||0)+1,n:0,currentBid:0,leader:null});
+  let p=null,ordN=0,ordTotal=0;
+  if(!forceRandom&&D.order&&D.order.length){
+    // 按生成的竞拍顺序：取顺序中第一个还在池中的球员
+    for(const pid of D.order){
+      const hit=cand.find(x=>x.id===pid);
+      if(hit){p=hit;ordN=D.order.indexOf(pid)+1;ordTotal=D.order.length;break}
+    }
+  }
+  if(!p)p=cand[Math.floor(Math.random()*cand.length)];
+  const next={state:'ready',pid:p.id,mode:a.mode||'public',seq:(a.seq||0)+1,n:0,currentBid:0,leader:null};
+  if(ordN){next.ordN=ordN;next.ordTotal=ordTotal}
+  await S.adapter.set('auction',next);
 }
 
 async function startBid(){
@@ -806,7 +866,6 @@ document.addEventListener('click',async e=>{
   const act=el.dataset.act;
   try{
   switch(act){
-    case 'join':doJoin($('#roomIn').value);break;
     case 'leave':leaveRoom();break;
     case 'createRoom':{
       const pin=$('#hostPin').value.trim();
@@ -826,26 +885,62 @@ document.addEventListener('click',async e=>{
       const name=$('#sgName').value.trim();
       const pos=[...document.querySelectorAll('.sgPos:checked')].map(x=>x.value).join('/');
       const note=$('#sgNote').value.trim();
+      const bundle=($('#sgBundle')&&$('#sgBundle').value)||'';
       if(!name){toast('请输入名字','bad');break}
       if(!pos){toast('请选择想打的位置','bad');break}
       const low=name.toLowerCase();
       if(D.signups.concat(D.players).some(x=>String(x.name).trim().toLowerCase()===low)){toast('这个名字已经报名了','bad');break}
-      await S.adapter.set('signups/s'+uid(),{name,pos,note,order:nextOrder()});
-      $('#sgName').value='';$('#sgNote').value='';
+      await S.adapter.set('signups/s'+uid(),{name,pos,note,bundle,order:nextOrder()});
+      $('#sgName').value='';$('#sgNote').value='';if($('#sgBundle'))$('#sgBundle').value='';
       document.querySelectorAll('.sgPos').forEach(x=>{x.checked=false});
       toast('报名成功 ✓ '+name,'good');break}
     case 'approve':{
-      const x=derive(S.data).signups.find(y=>y.id===el.dataset.id);if(!x)break;
-      await S.adapter.update({['players/p'+uid()]:{name:x.name,note:[x.pos,x.note].filter(Boolean).join(' · '),order:nextOrder()},['signups/'+x.id]:null});
+      const D=derive(S.data);
+      const x=D.signups.find(y=>y.id===el.dataset.id);if(!x)break;
+      const pid='p'+uid();
+      const rec={name:x.name,note:[x.pos,x.note].filter(Boolean).join(' · '),order:nextOrder()};
+      const upd={['signups/'+x.id]:null};
+      if(x.bundle&&D.teams.some(t=>t.id===x.bundle)){
+        // 打包：直接以 0 元成交给绑定队伍，占一个名额，不进竞拍池
+        rec.bundle=x.bundle;
+        upd['sales/sb'+uid()]={pid,tid:x.bundle,price:0,bundle:true,t:S.adapter.now()};
+      }
+      upd['players/'+pid]=rec;
+      await S.adapter.update(upd);
       renderSetup();break}
     case 'approveAll':{
       const D=derive(S.data);const upd={};
-      D.signups.forEach((x,i)=>{upd['players/p'+uid()]={name:x.name,note:[x.pos,x.note].filter(Boolean).join(' · '),order:nextOrder()+i};upd['signups/'+x.id]=null});
+      D.signups.forEach((x,i)=>{
+        const pid='p'+uid();
+        const rec={name:x.name,note:[x.pos,x.note].filter(Boolean).join(' · '),order:nextOrder()+i};
+        if(x.bundle&&D.teams.some(t=>t.id===x.bundle)){
+          rec.bundle=x.bundle;
+          upd['sales/sb'+uid()]={pid,tid:x.bundle,price:0,bundle:true,t:S.adapter.now()+i};
+        }
+        upd['players/'+pid]=rec;upd['signups/'+x.id]=null});
       await S.adapter.update(upd);renderSetup();toast('已加入 '+D.signups.length+' 人','good');break}
     case 'delSignup':await S.adapter.set('signups/'+el.dataset.id,null);break;
     case 'toggleSignup':await S.adapter.set('config/signupOpen',derive(S.data).cfg.signupOpen===false);break;
     case 'copySignup':copy(baseUrl()+'?room='+encodeURIComponent(S.room)+'&role=signup');break;
-    case 'pbDone':await S.adapter.set('prebidDone/'+S.teamId,!derive(S.data).prebidDone[S.teamId]);break;
+    case 'scDone':await S.adapter.set('scoreDone/'+S.teamId,!derive(S.data).scoreDone[S.teamId]);break;
+    case 'genOrder':{
+      const D=derive(S.data);
+      if(!D.pool.length){toast('球员池已空','bad');break}
+      // 排名：平均分高→低；同分比打分队数；再随机。没分数的排最后
+      const ranked=D.pool.slice().sort((a,b)=>{
+        const sa=D.avg[a.id],sb=D.avg[b.id];
+        const va=sa?sa.avg:-Infinity,vb=sb?sb.avg:-Infinity;
+        if(vb!==va)return vb-va;
+        const na=sa?sa.n:0,nb=sb?sb.n:0;
+        if(nb!==na)return nb-na;
+        return Math.random()-0.5;
+      });
+      const head=ranked.slice(0,12);           // 前 12 名保持名次顺序
+      const tail=ranked.slice(12);            // 其余 Fisher-Yates 打乱
+      for(let i=tail.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const tmp=tail[i];tail[i]=tail[j];tail[j]=tmp}
+      await S.adapter.set('order',head.concat(tail).map(p=>p.id));
+      toast('竞拍顺序已生成','good');break}
+    case 'clearOrder':await S.adapter.set('order',null);toast('已清除竞拍顺序','good');break;
     case 'pubAvg':await S.adapter.set('config/avgPublished',!derive(S.data).cfg.avgPublished);break;
     case 'roleTv':tryRole('tv');refresh();break;
     case 'roleCap':if(tryRole('captain',$('#capTeam').value,$('#capPin').value.trim()))refresh();break;
@@ -853,7 +948,8 @@ document.addEventListener('click',async e=>{
     case 'tab':setTab(el.dataset.tab);break;
     case 'bid':placeBid(el.dataset.amt);break;
     case 'bidCustom':placeBid($('#bidAmt').value);break;
-    case 'draw':await draw();break;
+    case 'draw':await draw(false);break;
+    case 'drawRandom':await draw(true);break;
     case 'mode':await S.adapter.set('auction/mode',el.dataset.mode);break;
     case 'start':await startBid();break;
     case 'endNow':await closeAuction(true);break;
@@ -902,9 +998,14 @@ document.addEventListener('click',async e=>{
 
 document.addEventListener('change',async e=>{
   const el=e.target;
-  if(el.dataset.pb){
-    const v=Math.floor(Number(el.value));
-    await S.adapter.set('prebids/'+S.teamId+'/'+el.dataset.pb,v>0?v:null);
+  if(el.dataset.sc){
+    const raw=String(el.value).trim();
+    if(raw===''){await S.adapter.set('scores/'+S.teamId+'/'+el.dataset.sc,null);return}
+    let v=Number(raw);
+    if(!isFinite(v)){await S.adapter.set('scores/'+S.teamId+'/'+el.dataset.sc,null);return}
+    v=Math.round(Math.max(0,Math.min(100,v)));
+    el.value=v;
+    await S.adapter.set('scores/'+S.teamId+'/'+el.dataset.sc,v);
     return;
   }
   if(el.dataset.path){
@@ -920,7 +1021,6 @@ document.addEventListener('input',e=>{if(e.target.id==='bidAmt')S.bidDraft=e.tar
 document.addEventListener('keydown',e=>{
   if(e.key!=='Enter')return;
   if(e.target.id==='bidAmt')placeBid(e.target.value);
-  else if(e.target.id==='roomIn')doJoin(e.target.value);
 });
 
 function baseUrl(){return location.origin+location.pathname}
