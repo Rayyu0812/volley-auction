@@ -231,7 +231,7 @@ function derive(d){
     t.roster=sales.filter(s=>s.tid===t.id);
     t.spent=t.roster.reduce((a,s)=>a+(s.price||0),0);
     t.remaining=(t.budget||0)-t.spent;
-    t.slotsLeft=Math.max(0,cfg.rosterSize-1-t.roster.length);
+    t.slotsLeft=Math.max(0,(t.size||cfg.rosterSize)-1-t.roster.length);
   });
   const pool=players.filter(p=>!soldMap[p.id]);
   const auction=d.auction||{state:'idle'};
@@ -537,7 +537,7 @@ function stageHtml(D){
 function bidPanelHtml(D,a,me){
   if(!me)return '';
   const cfg=D.cfg;
-  const info=`<div class="muted" style="font-size:13px">🏐 ${esc(me.name)} · 剩余预算 <b style="color:var(--accent2)">${me.remaining}亿</b> · 已选 ${me.roster.length}/${cfg.rosterSize-1}（不含队长）</div>`;
+  const info=`<div class="muted" style="font-size:13px">🏐 ${esc(me.name)} · 剩余预算 <b style="color:var(--accent2)">${me.remaining}亿</b> · 已选 ${me.roster.length}/${(me.size||cfg.rosterSize)-1}（不含队长）</div>`;
   if(a.state!=='bidding')return `<div class="card">${info}${me.slotsLeft<=0?'<div class="status-warn" style="margin-top:8px">你的队伍已满员</div>':''}</div>`;
   const cap=(a.caps&&a.caps[me.id])||0;
   const min=a.n?a.currentBid+a.inc:a.startBid;
@@ -590,7 +590,7 @@ function teamsHtml(D){
   return `<h2>👥 各队阵容</h2><div class="teams">${D.teams.map(t=>{
     const full=t.slotsLeft<=0;
     const lead=!hide&&a.state==='bidding'&&a.leader===t.id;
-    const total=D.cfg.rosterSize-1;
+    const total=(t.size||D.cfg.rosterSize)-1;
     const slots=Array.from({length:total},(_,i)=>`<i class="${i<t.roster.length?'f':''}"></i>`).join('');
     return `<div class="team ${t.id===S.teamId?'me':''} ${lead?'lead':''} ${full?'full':''}">
       <div class="tname">${esc(t.name)}${t.id===S.teamId?' <span class="pill cap">我</span>':''}${lead?' 👑':''}</div>
@@ -818,7 +818,7 @@ function renderSetup(){
       <input data-path="players/${p.id}/name" value="${esc(p.name)}">
       <input data-path="players/${p.id}/note" value="${esc(p.note||'')}" placeholder="备注（位置/水平）">
       <button class="danger small" data-act="delPlayer" data-id="${p.id}">✕</button></div>`).join('');
-  const need=D.teams.length*(c.rosterSize-1);
+  const need=D.teams.reduce((a,t)=>a+((t.size||c.rosterSize)-1),0);
   $('#p-setup').innerHTML=`<div style="max-width:900px;margin:0 auto">
     <div class="card"><h2>📣 邀请大家</h2>
       <div class="muted" style="font-size:13px;margin-bottom:8px">房间号：<b>${esc(S.room)}</b> · 主持人密码：<b>${esc((S.data.config||{}).hostPin)}</b></div>
